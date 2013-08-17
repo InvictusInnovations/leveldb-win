@@ -35,6 +35,10 @@
 #define close _close
 #define fread_unlocked _fread_nolock
 
+#ifdef SNAPPY
+#include <snappy/snappy.h>
+#endif
+
 #include <string>
 
 #include <stdint.h>
@@ -60,8 +64,9 @@ class Mutex {
   friend class CondVar;
   // critical sections are more efficient than mutexes
   // but they are not recursive and can only be used to synchronize threads within the same process
+  // additionnaly they cannot be used with SignalObjectAndWait that we use for CondVar
   // we use opaque void * to avoid including windows.h in port_win.h
-  void * cs_;
+  void * mutex_;
 
   // No copying
   Mutex(const Mutex&);
@@ -71,7 +76,7 @@ class Mutex {
 // the Win32 API offers a dependable condition variable mechanism, but only starting with
 // Windows 2008 and Vista
 // no matter what we will implement our own condition variable with a semaphore
-// implementation as described in a paper written by Andrew D. Birrell in 2003
+// implementation as described in a paper written by Douglas C. Schmidt and Irfan Pyarali
 class CondVar {
  public:
   explicit CondVar(Mutex* mu);
@@ -85,10 +90,10 @@ class CondVar {
   Mutex wait_mtx_;
   long waiting_;
   
-  void * sem1_;
-  void * sem2_;
-  
-  
+  void * sema_;
+  void * event_;
+
+  bool broadcasted_;  
 };
 
 // Storage for a lock-free pointer
@@ -106,6 +111,11 @@ class AtomicPointer {
 
   void NoBarrier_Store(void* v);
 };
+
+typedef volatile long OnceType;
+#define LEVELDB_ONCE_INIT (0)
+
+extern void InitOnce(OnceType* once, void (*initializer)());
 
 inline bool Snappy_Compress(const char* input, size_t length,
                             ::std::string* output) {

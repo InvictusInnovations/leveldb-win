@@ -5,7 +5,9 @@
 #include "leveldb/c.h"
 
 #include <stdlib.h>
+#ifndef LEVELDB_PLATFORM_WINDOWS
 #include <unistd.h>
+#endif
 #include "leveldb/cache.h"
 #include "leveldb/comparator.h"
 #include "leveldb/db.h"

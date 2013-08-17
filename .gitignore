@@ -1,0 +1,30 @@
+build_config.mk
+*.a
+*.o
+*.dylib*
+*.so
+*.so.*
+*_test
+db_bench
+
+
+#CMake->MSVC artifacts
+*.sln
+*.vcxproj
+ALL_BUILD
+ZERO_CHECK
+
+#MSVC secondary artifacts
+*.suo
+*.vcxproj.filters
+*.vcxproj.user
+*.pdb
+*.ilk
+*.lastbuildstate
+*.sdf
+*.opensdf
+Debug/
+Release/
+
+# Log files
+*.tlog

@@ -3,6 +3,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include <deque>
+#include <set>
 
 #ifdef WIN32
 #include <windows.h>
@@ -62,6 +63,7 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/interprocess/sync/file_lock.hpp>
 #include <boost/thread/condition_variable.hpp>
+#include <boost/thread/mutex.hpp>
 
 namespace leveldb {
 namespace {
@@ -242,15 +244,43 @@ private:
 
 class BoostFileLock : public FileLock {
  public:
+  std::ofstream file_;
   boost::interprocess::file_lock fl_;
+  std::string name_;
+};
+
+// Set of locked files.  We keep a separate set instead of just
+// relying on fcntrl(F_SETLK) since fcntl(F_SETLK) does not provide
+// any protection against multiple uses from the same process.
+class BoostLockTable {
+ private:
+  boost::mutex mu_;
+  std::set<std::string> locked_files_;
+ public:
+  bool Insert(const std::string& fname) {
+    boost::unique_lock<boost::mutex> l(mu_);
+    return locked_files_.insert(fname).second;
+  }
+  void Remove(const std::string& fname) {
+    boost::unique_lock<boost::mutex> l(mu_);
+    locked_files_.erase(fname);
+  }
 };
 
 class PosixEnv : public Env {
  public:
   PosixEnv();
-  virtual ~PosixEnv() {
-    fprintf(stderr, "Destroying Env::Default()\n");
-    exit(1);
+  virtual ~PosixEnv() 
+  {
+      if (bgthread_)
+      {
+          bgthread_->interrupt();
+          bgthread_->join();
+          bgthread_.reset();
+      }
+
+      boost::unique_lock<boost::mutex> lock(mu_);
+      queue_.clear();
   }
 
   virtual Status NewSequentialFile(const std::string& fname,
@@ -295,7 +325,8 @@ class PosixEnv : public Env {
   }
 
   virtual bool FileExists(const std::string& fname) {
-    return boost::filesystem::exists(fname);
+    boost::system::error_code ec;
+    return boost::filesystem::exists(fname, ec);
   }
 
   virtual Status GetChildren(const std::string& dir,
@@ -304,7 +335,7 @@ class PosixEnv : public Env {
 
     boost::system::error_code ec;
     boost::filesystem::directory_iterator current(dir, ec);
-    if (ec) {
+    if (ec != 0) {
       return Status::IOError(dir, ec.message());
     }
 
@@ -324,7 +355,7 @@ class PosixEnv : public Env {
 
     Status result;
 
-    if (ec) {
+    if (ec != 0) {
       result = Status::IOError(fname, ec.message());
     }
 
@@ -334,13 +365,13 @@ class PosixEnv : public Env {
   virtual Status CreateDir(const std::string& name) {
       Status result;
 
-      if (boost::filesystem::exists(name) &&
-          boost::filesystem::is_directory(name)) {
-        return result;
-      }
-
       boost::system::error_code ec;
 
+      if (boost::filesystem::exists(name, ec) &&
+          boost::filesystem::is_directory(name, ec)) {
+        return result;
+      }
+      
       if (!boost::filesystem::create_directories(name, ec)) {
         result = Status::IOError(name, ec.message());
       }
@@ -365,7 +396,7 @@ class PosixEnv : public Env {
     Status result;
 
     *size = static_cast<uint64_t>(boost::filesystem::file_size(fname, ec));
-    if (ec) {
+    if (ec != 0) {
       *size = 0;
        result = Status::IOError(fname, ec.message());
     }
@@ -380,49 +411,51 @@ class PosixEnv : public Env {
 
     Status result;
 
-    if (ec) {
+    if (ec != 0) {
       result = Status::IOError(src, ec.message());
     }
 
     return result;
   }
 
+
   virtual Status LockFile(const std::string& fname, FileLock** lock) {
-    *lock = NULL;
-
-    Status result;
-
-    try {
-      if (!boost::filesystem::exists(fname)) {
-        std::ofstream of(fname, std::ios_base::trunc | std::ios_base::out);
-      }
-
-      assert(boost::filesystem::exists(fname));
-
-      boost::interprocess::file_lock fl(fname.c_str());
-      BoostFileLock * my_lock = new BoostFileLock();
-      my_lock->fl_ = std::move(fl);
-      my_lock->fl_.lock();
-      *lock = my_lock;
-    } catch (const std::exception & e) {
-      result = Status::IOError("lock " + fname, e.what());
+    *lock = nullptr;
+    std::ofstream of(fname.c_str(), std::ios_base::trunc | std::ios_base::out);
+    if (of.bad()) {
+        return Status::IOError("lock " + fname, "cannot create lock file");
     }
-
-    return result;
+    if (!locks_.Insert(fname)) {
+        of.close();
+        return Status::IOError("lock " + fname, "already held by process");
+    }
+    boost::interprocess::file_lock fl(fname.c_str());
+    if (!fl.try_lock()) {
+        of.close();         
+        locks_.Remove(fname);
+        return Status::IOError("lock " + fname, "database already in use: could not acquire exclusive lock" );
+    }
+    BoostFileLock * my_lock = new BoostFileLock();
+    my_lock->name_ = fname;
+    my_lock->file_ = std::move(of);
+    my_lock->fl_ = std::move(fl);
+    *lock = my_lock;
+    return Status();
   }
 
+
+
   virtual Status UnlockFile(FileLock* lock) {
-
+    BoostFileLock * my_lock = static_cast<BoostFileLock *>(lock);
     Status result;
-
-    try {
-      BoostFileLock * my_lock = static_cast<BoostFileLock *>(lock);
-      my_lock->fl_.unlock();
-      delete my_lock;
+    try {      
+      my_lock->fl_.unlock();      
     } catch (const std::exception & e) {
-      result = Status::IOError("unlock", e.what());
+      result = Status::IOError("unlock " + my_lock->name_, e.what());
     }
-
+    locks_.Remove(my_lock->name_);
+    my_lock->file_.close();
+    delete my_lock;
     return result;
   }
 
@@ -434,7 +467,7 @@ class PosixEnv : public Env {
     boost::system::error_code ec;
     boost::filesystem::path temp_dir = 
         boost::filesystem::temp_directory_path(ec);
-    if (ec) {
+    if (ec != 0) {
       temp_dir = "tmp";
     }
 
@@ -507,6 +540,8 @@ class PosixEnv : public Env {
   struct BGItem { void* arg; void (*function)(void*); };
   typedef std::deque<BGItem> BGQueue;
   BGQueue queue_;
+
+  BoostLockTable locks_;
 };
 
 PosixEnv::PosixEnv() { }
@@ -532,21 +567,26 @@ void PosixEnv::Schedule(void (*function)(void*), void* arg) {
 }
 
 void PosixEnv::BGThread() {
-  while (true) {
-  // Wait until there is an item that is ready to run
-  boost::unique_lock<boost::mutex> lock(mu_);
+    try
+    {
+        while (true) {
+            // Wait until there is an item that is ready to run
+            boost::unique_lock<boost::mutex> lock(mu_);
 
-  while (queue_.empty()) {
-    bgsignal_.wait(lock);
-  }
+            while (queue_.empty()) {
+                bgsignal_.wait(lock);
+            }
 
-  void (*function)(void*) = queue_.front().function;
-  void* arg = queue_.front().arg;
-  queue_.pop_front();
+            void (*function)(void*) = queue_.front().function;
+            void* arg = queue_.front().arg;
+            queue_.pop_front();
 
-  lock.unlock();
-  (*function)(arg);
-  }
+            lock.unlock();
+            (*function)(arg);
+        }
+    }
+    catch (const boost::thread_interrupted &) {}
+
 }
 
 namespace {
@@ -573,8 +613,9 @@ void PosixEnv::StartThread(void (*function)(void* arg), void* arg) {
 
 }
 
+static const boost::once_flag init_value = BOOST_ONCE_INIT;
 static boost::once_flag once = BOOST_ONCE_INIT;
-static Env* default_env;
+static Env* default_env = nullptr;
 static void InitDefaultEnv() { 
   ::memset(global_read_only_buf, 0, sizeof(global_read_only_buf));
   default_env = new PosixEnv;
@@ -582,8 +623,16 @@ static void InitDefaultEnv() {
 
 Env* Env::Default() {
   boost::call_once(once, InitDefaultEnv);
-
   return default_env;
 }
+
+//DLN: doesn't exist in this version of leveldb
+#if 0
+void Env::UnsafeDeallocate() {
+    once = init_value;
+    delete default_env;
+    default_env = nullptr;
+}
+#endif
 
 }
