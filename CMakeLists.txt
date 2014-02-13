@@ -1,11 +1,3 @@
-include_directories( ${CMAKE_CURRENT_SOURCE_DIR}/include )
-include_directories( ${CMAKE_CURRENT_SOURCE_DIR} )
-
-IF(WIN32)
-  ADD_DEFINITIONS( -DLEVELDB_PLATFORM_WINDOWS)
-  ADD_DEFINITIONS( -DOS_WIN)
-ENDIF(WIN32)
-
 set( sources 
     db/builder.cc
     db/c.cc
@@ -58,3 +50,14 @@ set( sources
 )
 
 add_library( leveldb  ${sources} )
+
+target_include_directories(leveldb 
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${Boost_INCLUDE_DIR}
+  )
+
+IF(WIN32)
+  target_compile_definitions(leveldb PUBLIC LEVELDB_PLATFORM_WINDOWS PRIVATE OS_WIN BOOST_ALL_NO_LIB)
+ENDIF(WIN32)
+
