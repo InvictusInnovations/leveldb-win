@@ -1,9 +1,11 @@
 include_directories( ${CMAKE_CURRENT_SOURCE_DIR}/include )
 include_directories( ${CMAKE_CURRENT_SOURCE_DIR} )
+include_directories( ${Boost_INCLUDE_DIR} )
 
 IF(WIN32)
   ADD_DEFINITIONS( -DLEVELDB_PLATFORM_WINDOWS)
   ADD_DEFINITIONS( -DOS_WIN)
+  ADD_DEFINITIONS( -DBOOST_ALL_NO_LIB)
 ENDIF(WIN32)
 
 set( sources 
