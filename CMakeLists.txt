@@ -59,5 +59,7 @@ target_include_directories(leveldb
 
 IF(WIN32)
   target_compile_definitions(leveldb PUBLIC LEVELDB_PLATFORM_WINDOWS PRIVATE OS_WIN BOOST_ALL_NO_LIB)
+  # see fc CMakeLists.txt for details
+  target_compile_options(leveldb PUBLIC /EHsc /UBOOST_ALL_DYN_LINK /UBOOST_LINKING_PYTHON /UBOOST_DEBUG_PYTHON)
 ENDIF(WIN32)
 
